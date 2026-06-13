@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 # C extensions
+.DS_Store
 *.so
 musdb18
 # Distribution / packaging
