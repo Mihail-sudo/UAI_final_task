@@ -84,16 +84,37 @@ def pad_mag(mag):
     return mag.numpy()
 
 
-def to_mag(audio):
+def to_stft(audio):
     """
-        Преобразует waveform в magnitude
+        Waveform -> Complex STFT
     """
-    stft = tf.signal.stft(audio, frame_length=FRAME_LENGTH, frame_step=FRAME_STEP)
+    return tf.signal.stft(
+        audio,
+        frame_length=FRAME_LENGTH,
+        frame_step=FRAME_STEP
+    )
 
+
+def stft_to_mag(stft, log_scale=True):
+    """
+    Complex STFT -> Magnitude
+    """
     mag = tf.abs(stft)
+
+    if log_scale:
+        mag = tf.math.log1p(mag)
+
     mag = mag[..., tf.newaxis]
 
-    return mag.numpy()
+    return mag.numpy().astype(np.float32)
+
+
+def stft_to_phase(stft):
+    """
+    Complex STFT -> Phase
+    """
+    phase = tf.math.angle(stft)
+    return phase.numpy().astype(np.float32)
 
 
 def random_chunk(*tracks):
@@ -135,7 +156,7 @@ def load_song(input_path):
 
 def preprocess_song(input_path, output_dir):
     """
-        Обработка песни: из одного стема получается 20 20-ти секундных трека
+        Обработка песни: из одного стема получается NUM_CHUNKS CHUNK_SEC секундных трека
     """
 
     mix, drums, bass, other, vocals = load_song(input_path)
@@ -145,16 +166,27 @@ def preprocess_song(input_path, output_dir):
     for i in range(NUM_CHUNKS):
         mix_chunk, drums_chunk, bass_chunk, other_chunk, vocals_chunk = random_chunk(mix, drums, bass, other, vocals)
         
-        mix_mag = pad_mag(to_mag(mix_chunk)).astype(np.float32)
-        drums_mag = pad_mag(to_mag(drums_chunk)).astype(np.float32)
-        bass_mag = pad_mag(to_mag(bass_chunk)).astype(np.float32)
-        other_mag = pad_mag(to_mag(other_chunk)).astype(np.float32)
-        vocals_mag = pad_mag(to_mag(vocals_chunk)).astype(np.float32)
+        mix_stft = to_stft(mix_chunk)
+        mix_mag = pad_mag(stft_to_mag(mix_stft))
+        mix_phase = pad_mag(stft_to_phase(mix_stft)[..., np.newaxis])
+
+        drums_stft = to_stft(drums_chunk)
+        drums_mag = pad_mag(stft_to_mag(drums_stft))
+
+        bass_stft = to_stft(bass_chunk)
+        bass_mag = pad_mag(stft_to_mag(bass_stft))
+
+        other_stft = to_stft(other_chunk)
+        other_mag = pad_mag(stft_to_mag(other_stft))
+
+        vocals_stft = to_stft(vocals_chunk)
+        vocals_mag = pad_mag(stft_to_mag(vocals_stft))
 
         np.savez_compressed(
             os.path.join(output_dir, f"{name}_{i:02d}.npz"),
             mix=mix_mag,
             drums=drums_mag,
+            mix_phase=mix_phase,
             bass=bass_mag,
             other=other_mag,
             vocals=vocals_mag,
