@@ -16,8 +16,15 @@ NUM_CHUNKS = 10
 # Кол-во сэмплов для обучния
 CHUNK_SAMPLES = GLOBAL_RATE * CHUNK_SEC
 
-FRAME_LENGTH = 1024
-FRAME_STEP = 256
+FRAME_LENGTH = 2048
+FRAME_STEP = 512
+
+SQRT_HANN_WINDOW = tf.sqrt(
+    tf.signal.hann_window(
+        FRAME_LENGTH,
+        periodic=True
+    )
+)
 
 # параметр отвечающий за размер свертки / развертки модели (нужен для корректной работы encoder / decoder)
 CONV_SIZE = 16
@@ -65,7 +72,7 @@ def load_audio(input_file, track_index='0:a:0', mono=True):
     return mix_waveform, sr
 
 
-def pad_mag(mag):
+def pad_spectrogram(mag):
     """
         Расширить размер аудио до необходимого для корректной работы модели
     """
@@ -74,47 +81,60 @@ def pad_mag(mag):
     pad_h = (CONV_SIZE - h % CONV_SIZE) % CONV_SIZE
     pad_w = (CONV_SIZE - w % CONV_SIZE) % CONV_SIZE
 
-    mag = tf.pad(mag, 
+    mag = np.pad(mag, 
         [
-            [0, pad_h],
-            [0, pad_w],
-            [0, 0]
-        ]
+            (0, pad_h),
+            (0, pad_w),
+            (0, 0)
+        ], 
+        mode="constant"
     )
-    return mag.numpy()
+    return mag
+
+
+def sqrt_hann_window(frame_length, dtype):
+    return tf.cast(SQRT_HANN_WINDOW, dtype)
 
 
 def to_stft(audio):
     """
         Waveform -> Complex STFT
     """
+
     return tf.signal.stft(
         audio,
         frame_length=FRAME_LENGTH,
-        frame_step=FRAME_STEP
+        frame_step=FRAME_STEP,
+        fft_length=FRAME_LENGTH,
+        window_fn=sqrt_hann_window
+    )
+
+
+def inverse_stft(stft):
+    """
+    Complex STFT -> Waveform
+    """
+
+    return tf.signal.inverse_stft(
+        stft,
+        frame_length=FRAME_LENGTH,
+        frame_step=FRAME_STEP,
+        fft_length=FRAME_LENGTH,
+        window_fn=sqrt_hann_window
     )
 
 
 def stft_to_mag(stft, log_scale=True):
-    """
-    Complex STFT -> Magnitude
-    """
     mag = tf.abs(stft)
 
     if log_scale:
         mag = tf.math.log1p(mag)
 
-    mag = mag[..., tf.newaxis]
-
-    return mag.numpy().astype(np.float32)
+    return mag[..., tf.newaxis].numpy().astype(np.float32)
 
 
 def stft_to_phase(stft):
-    """
-    Complex STFT -> Phase
-    """
-    phase = tf.math.angle(stft)
-    return phase.numpy().astype(np.float32)
+    return tf.math.angle(stft).numpy().astype(np.float16)
 
 
 def random_chunk(*tracks):
@@ -127,7 +147,7 @@ def random_chunk(*tracks):
         result = []
         for track in tracks:
             pad = CHUNK_SAMPLES - len(track)
-            result.append(np.pad(track, (0, pad)))
+            result.append(np.pad(track, (0, pad), mode="constant"))
         return result
 
     start = random.randint(0, length - CHUNK_SAMPLES)
@@ -167,27 +187,35 @@ def preprocess_song(input_path, output_dir):
         mix_chunk, drums_chunk, bass_chunk, other_chunk, vocals_chunk = random_chunk(mix, drums, bass, other, vocals)
         
         mix_stft = to_stft(mix_chunk)
-        mix_mag = pad_mag(stft_to_mag(mix_stft))
-        mix_phase = pad_mag(stft_to_phase(mix_stft)[..., np.newaxis])
+        mix_mag = pad_spectrogram(stft_to_mag(mix_stft))
+        # mix_phase = pad_spectrogram(stft_to_phase(mix_stft)[..., np.newaxis])
 
         drums_stft = to_stft(drums_chunk)
-        drums_mag = pad_mag(stft_to_mag(drums_stft))
+        drums_mag = pad_spectrogram(stft_to_mag(drums_stft))
 
         bass_stft = to_stft(bass_chunk)
-        bass_mag = pad_mag(stft_to_mag(bass_stft))
+        bass_mag = pad_spectrogram(stft_to_mag(bass_stft))
 
         other_stft = to_stft(other_chunk)
-        other_mag = pad_mag(stft_to_mag(other_stft))
+        other_mag = pad_spectrogram(stft_to_mag(other_stft))
 
         vocals_stft = to_stft(vocals_chunk)
-        vocals_mag = pad_mag(stft_to_mag(vocals_stft))
+        vocals_mag = pad_spectrogram(stft_to_mag(vocals_stft))
+
+
+        eps = 1e-8
+
+        drums_mask = drums_mag / (mix_mag + eps)
+        bass_mask = bass_mag / (mix_mag + eps)
+        other_mask = other_mag / (mix_mag + eps)
+        vocals_mask = vocals_mag / (mix_mag + eps)
 
         np.savez_compressed(
             os.path.join(output_dir, f"{name}_{i:02d}.npz"),
+            # mix_phase=mix_phase,
             mix=mix_mag,
-            drums=drums_mag,
-            mix_phase=mix_phase,
-            bass=bass_mag,
-            other=other_mag,
-            vocals=vocals_mag,
+            drums=drums_mask,
+            bass=bass_mask,
+            other=other_mask,
+            vocals=vocals_mask,
         )
