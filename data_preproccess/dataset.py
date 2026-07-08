@@ -176,6 +176,8 @@ def preprocess(example):
 
     mix = log_mag[0][...,None]
 
+    mix_mag = mag[0]
+
     masks = mag[1:] / (mag[0] + EPS)
     masks = tf.clip_by_value(masks, 0.0, 1.0)
 
@@ -184,7 +186,9 @@ def preprocess(example):
         [1,2,0]
     )
 
-    return mix, masks
+    target = tf.concat([masks, mix_mag[..., tf.newaxis]], axis=-1)
+
+    return mix, target
 
 
 # ==========================================================

@@ -6,6 +6,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data_preproccess"))
 import tensorflow as tf
 from data_preproccess.dataset import create_dataset
 from model import create_unet
+from losses import CombinedSpectrogramLoss
+
+
+def mask_mae(y_true, y_pred):
+    return tf.reduce_mean(tf.abs(y_true[..., :4] - y_pred))
 
 TFRECORD_DIR = "musdb18/tfrecord"
 TEST_TFRECORD_DIR = "musdb18/tfrecord_test"
@@ -61,8 +66,8 @@ def main():
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss="mse",
-        metrics=["mae"],
+        loss=CombinedSpectrogramLoss(alpha=1.0, beta=1e-3),
+        metrics=[mask_mae],
     )
 
     model.summary()
