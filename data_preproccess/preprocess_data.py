@@ -128,7 +128,7 @@ def stft_to_mag(stft, log_scale=True):
     mag = tf.abs(stft)
 
     if log_scale:
-        mag = tf.math.log1p(mag)
+        mag = tf.math.abs(mag)
 
     return mag[..., tf.newaxis].numpy().astype(np.float32)
 
