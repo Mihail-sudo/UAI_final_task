@@ -9,6 +9,9 @@ FRAME_LENGTH = 2048
 FRAME_STEP = 512
 CONV_SIZE = 16
 
+CHUNK_FRAMES = 864  # ~10s at 44100 Hz / 512 stride
+CHUNK_HOP = CHUNK_FRAMES // 2
+
 SQRT_HANN_WINDOW = tf.sqrt(
     tf.signal.hann_window(FRAME_LENGTH, periodic=True)
 )
@@ -47,15 +50,37 @@ def separate(audio, model):
 
     mag = tf.abs(stft).numpy()
     phase = tf.math.angle(stft).numpy()
+    T, F = mag.shape
 
     padded_mag = pad_spectrogram(mag)
-    log_mag = np.log1p(padded_mag)
-    log_mag = log_mag[np.newaxis, :, :, np.newaxis]
+    T_pad, F_pad = padded_mag.shape
 
-    masks = model.predict(log_mag, verbose=0)[0]
+    mask_accum = np.zeros((T_pad, F_pad, 4), dtype=np.float64)
+    weight_accum = np.zeros(T_pad, dtype=np.float64)
+    ola_window = np.hanning(CHUNK_FRAMES)
 
-    h, w = mag.shape
-    masks = masks[:h, :w]
+    for start in range(0, T_pad, CHUNK_HOP):
+        end = start + CHUNK_FRAMES
+        chunk = padded_mag[start:end, :]
+
+        pad = 0
+        if chunk.shape[0] < CHUNK_FRAMES:
+            pad = CHUNK_FRAMES - chunk.shape[0]
+            chunk = np.pad(chunk, [(0, pad), (0, 0)])
+
+        log_chunk = np.log1p(chunk)[np.newaxis, :, :, np.newaxis]
+        masks = model.predict(log_chunk, verbose=0)[0]
+
+        if pad:
+            masks = masks[:-pad]
+
+        n = masks.shape[0]
+        mask_accum[start : start + n] += masks * ola_window[:n, np.newaxis, np.newaxis]
+        weight_accum[start : start + n] += ola_window[:n]
+
+    mask_accum /= weight_accum[:, np.newaxis, np.newaxis] + 1e-8
+
+    masks = mask_accum[:T, :F, :].astype(np.float32)
 
     sources = []
     for i in range(4):
