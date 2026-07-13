@@ -63,7 +63,10 @@ def create_unet(
     se_ratio=8,
     use_self_attn=True,
     self_attn_heads=4,
+    n_input_channels=None,
 ):
+    if n_input_channels is not None:
+        input_shape = (input_shape[0], input_shape[1], n_input_channels)
     inputs = layers.Input(shape=input_shape)
 
     x = inputs
@@ -101,6 +104,6 @@ def create_unet(
         if dropout_rate > 0 and i > 0:
             x = layers.Dropout(dropout_rate)(x)
 
-    outputs = layers.Conv2D(n_outputs, 1, padding="same", activation="sigmoid")(x)
+    outputs = layers.Conv2D(n_outputs, 1, padding="same", activation="softmax")(x)
 
     return models.Model(inputs, outputs)

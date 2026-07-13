@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data_preproccess"))
 
 import tensorflow as tf
-from data_preproccess.dataset import create_dataset
+from data_preproccess.dataset import create_dataset, MR_STFT_CONFIGS
 from model import create_unet
 from losses import CombinedSpectrogramLoss
 
@@ -62,7 +62,8 @@ def main():
             ),
         ]
 
-    model = create_unet()
+    n_channels = len(MR_STFT_CONFIGS)
+    model = create_unet(input_shape=(None, None, n_channels))
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),

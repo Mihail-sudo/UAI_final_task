@@ -27,6 +27,7 @@
 - **Legacy model** (`ver-1.ipynb` cell 25): 1D U-Net, waveform-in/waveform-out, **not compatible** with current pipeline
 - **Training workflow**: (1) `to_tf_record.py` → (2) `compute_stats.py` → (3) `train.py`
 - **Inference**: `inference.py input.mp3` — STFT → predict masks → ISTFT with mix phase
+- **Multi-resolution STFT**: `MR_STFT_CONFIGS` in `dataset.py` and `inference.py` defines N `(frame_length, frame_step)` pairs. Reference (first config) is used for mask computation; all mix STFTs are resized to reference grid and stacked along channel dim → model input `(T, F, N)`. Add/remove entries to change channel count.
 - **Preprocessing constants** differ between `preprocess_data.py` and the notebook — check before reusing
 - **No tests, no CI/CD, no linting/formatting config**
 - **Telegram bot + LLM (LangChain/LLaMA) not yet implemented** — only the ML pipeline and model exist

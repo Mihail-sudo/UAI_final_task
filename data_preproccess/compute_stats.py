@@ -10,39 +10,44 @@ def compute_stats(tfrecord_dir, output_file="stats.npz", batch_size=8):
         shuffle=False
     )
 
-    pixel_sum = 0.0
-    pixel_sq_sum = 0.0
+    print("Computing per-channel statistics...")
+
+    n_channels = None
+    pixel_sum = None
+    pixel_sq_sum = None
     pixel_count = 0
 
-    print("Computing statistics...")
-
     for step, (x, _) in enumerate(dataset):
+        x = x.numpy().astype(np.float64)
 
-        x = x.numpy()
+        if n_channels is None:
+            n_channels = x.shape[-1]
+            pixel_sum = np.zeros(n_channels, dtype=np.float64)
+            pixel_sq_sum = np.zeros(n_channels, dtype=np.float64)
 
-        pixel_sum += x.sum(dtype=np.float64)
-        pixel_sq_sum += np.square(x, dtype=np.float64).sum(dtype=np.float64)
-        pixel_count += x.size
+        pixel_sum += x.sum(axis=(0, 1, 2))
+        pixel_sq_sum += (x ** 2).sum(axis=(0, 1, 2))
+        pixel_count += x.shape[0] * x.shape[1] * x.shape[2]
 
         if (step + 1) % 100 == 0:
-            print(f"Processed batches: {step + 1}")
+            print(f"Processed batches: {step + 1}  (channels: {n_channels})")
 
     mean = pixel_sum / pixel_count
     var = pixel_sq_sum / pixel_count - mean ** 2
-    std = np.sqrt(max(var, 1e-12))
+    std = np.sqrt(np.maximum(var, 1e-12))
 
-    np.savez(output_file, mean=np.float32(mean), std=np.float32(std))
+    np.savez(output_file, mean=mean.astype(np.float32), std=std.astype(np.float32))
 
     print()
     print("Done")
-    print(f"Mean : {mean:.6f}")
-    print(f"Std  : {std:.6f}")
+    for i in range(n_channels):
+        print(f"  Channel {i}: mean={mean[i]:.6f}  std={std[i]:.6f}")
     print(f"Saved: {output_file}")
 
 
 if __name__ == "__main__":
     compute_stats(
-        tfrecord_dir="../musdb18/tfrecord",
-        output_file="../musdb18/stats.npz",
+        tfrecord_dir="musdb18/tfrecord",
+        output_file="musdb18/stats.npz",
         batch_size=8
     )

@@ -1,21 +1,11 @@
 import tensorflow as tf
 
 
-def mask_bce(y_true, y_pred):
-    return tf.reduce_mean(
-        tf.keras.losses.binary_crossentropy(y_true, y_pred)
-    )
-
-
-def mask_mae(y_true, y_pred):
-    return tf.reduce_mean(tf.abs(y_true[..., :4] - y_pred))
-
-
 class MultiResolutionSpectrogramLoss(tf.keras.losses.Loss):
     def __init__(
         self,
         alpha=1.0,
-        beta=1e-3,
+        beta=1.0,
         scales=(1, 2, 4),
         name="multi_res_spec_loss",
     ):
@@ -28,9 +18,9 @@ class MultiResolutionSpectrogramLoss(tf.keras.losses.Loss):
         target_masks = y_true[..., :4]
         mix_mag = y_true[..., 4:5]
 
-        bce = mask_bce(target_masks, y_pred)
-        spec_loss = 0.0
+        mask_loss = tf.reduce_mean(tf.abs(target_masks - y_pred))
 
+        spec_loss = 0.0
         for s in self.scales:
             pred_src = mix_mag * y_pred
             target_src = mix_mag * target_masks
@@ -42,7 +32,7 @@ class MultiResolutionSpectrogramLoss(tf.keras.losses.Loss):
             spec_loss += tf.reduce_mean(tf.abs(pred_src - target_src))
 
         spec_loss /= len(self.scales)
-        return self.alpha * bce + self.beta * spec_loss
+        return self.alpha * mask_loss + self.beta * spec_loss
 
 
 CombinedSpectrogramLoss = MultiResolutionSpectrogramLoss

@@ -1,4 +1,6 @@
 import os
+from functools import partial
+
 import numpy as np
 import tensorflow as tf
 
@@ -6,25 +8,21 @@ import tensorflow as tf
 # CONFIG
 # ==========================================================
 
-FRAME_LENGTH = 2048
-FRAME_STEP = 512
+# Multi-resolution STFT configs: list of (frame_length, frame_step)
+# First entry is the reference resolution used for mask computation
+MR_STFT_CONFIGS = [
+    (2048, 512),   # reference: high frequency resolution
+    (1024, 256),   # high time resolution
+]
 CONV_SIZE = 16
 EPS = 1e-4
 
-SQRT_HANN_WINDOW = tf.sqrt(
-    tf.signal.hann_window(
-        FRAME_LENGTH,
-        periodic=True
-    )
-)
 
-
-# ==========================================================
-# STFT
-# ==========================================================
-
-def sqrt_hann_window(frame_length, dtype):
-    return tf.cast(SQRT_HANN_WINDOW, dtype)
+def _make_window_fn(frame_length):
+    window = tf.sqrt(tf.signal.hann_window(frame_length, periodic=True))
+    def _fn(fl, dtype):
+        return tf.cast(window, dtype)
+    return _fn
 
 
 # ==========================================================
@@ -69,20 +67,6 @@ def parse_tfrecord(example_proto):
 
 
 # ==========================================================
-# STFT
-# ==========================================================
-
-def waveform_to_stft(audio):
-    return tf.signal.stft(
-        audio,
-        frame_length=FRAME_LENGTH,
-        frame_step=FRAME_STEP,
-        fft_length=FRAME_LENGTH,
-        window_fn=sqrt_hann_window
-    )
-
-
-# ==========================================================
 # Padding
 # ==========================================================
 
@@ -93,15 +77,13 @@ def pad_feature(x):
     pad_h = (CONV_SIZE - h % CONV_SIZE) % CONV_SIZE
     pad_w = (CONV_SIZE - w % CONV_SIZE) % CONV_SIZE
 
-    x = tf.pad(
-        x,
-        [
-            [0, pad_h],
-            [0, pad_w]
-        ]
-    )
+    paddings = [[0, pad_h], [0, pad_w]]
 
-    return x
+    ndims = x.shape.rank
+    if ndims is not None and ndims > 2:
+        paddings.extend([[0, 0]] * (ndims - 2))
+
+    return tf.pad(x, paddings)
 
 
 # ==========================================================
@@ -120,20 +102,34 @@ def log_magnitude(mag):
 # Spectrogram
 # ==========================================================
 
-def waveform_to_features(audio):
-    stft = waveform_to_stft(audio)
+def waveform_to_features(audio, configs=None):
+    if configs is None:
+        configs = MR_STFT_CONFIGS
 
-    mag = magnitude(stft)
+    ref_fl, ref_fs = configs[0]
+    ref_wfn = _make_window_fn(ref_fl)
+    ref_stft = tf.signal.stft(audio, frame_length=ref_fl, frame_step=ref_fs, fft_length=ref_fl, window_fn=ref_wfn)
+    ref_mag = tf.abs(ref_stft)
+    ref_T = tf.shape(ref_mag)[0]
+    ref_F = tf.shape(ref_mag)[1]
 
-    log_mag = log_magnitude(mag)
+    channels = []
+    for i, (fl, fs) in enumerate(configs):
+        wfn = _make_window_fn(fl)
+        s = tf.signal.stft(audio, frame_length=fl, frame_step=fs, fft_length=fl, window_fn=wfn)
+        mag = tf.abs(s)
+        log_mag = tf.math.log1p(mag)
 
-    mag = pad_feature(mag)
-    log_mag = pad_feature(log_mag)
+        if i == 0:
+            channels.append(log_mag)
+        else:
+            log_mag = log_mag[tf.newaxis, ..., tf.newaxis]
+            log_mag = tf.image.resize(log_mag, [ref_T, ref_F])
+            channels.append(log_mag[0, ..., 0])
 
-    mag = mag[..., tf.newaxis]
-    log_mag = log_mag[..., tf.newaxis]
-
-    return mag, log_mag
+    feat = tf.stack(channels, axis=-1)
+    feat = pad_feature(feat)
+    return feat
 
 
 def pad_batch(x):
@@ -156,39 +152,59 @@ def pad_batch(x):
 # Example preprocessing
 # ==========================================================
 
-def preprocess(example):
+def preprocess(example, configs=None):
+    if configs is None:
+        configs = MR_STFT_CONFIGS
+
     tracks = tf.stack([
         example["mix"],
         example["drums"],
         example["bass"],
         example["other"],
-        example["vocals"]
+        example["vocals"],
     ])
 
-    stft = waveform_to_stft(tracks)
+    mix = example["mix"]
 
-    mag = tf.abs(stft)
+    # Reference STFT (first config) — used for mask computation
+    ref_fl, ref_fs = configs[0]
+    ref_wfn = _make_window_fn(ref_fl)
+    ref_stft = tf.signal.stft(tracks, frame_length=ref_fl, frame_step=ref_fs, fft_length=ref_fl, window_fn=ref_wfn)
+    ref_mag = tf.abs(ref_stft)
+    ref_T = tf.shape(ref_mag)[1]
+    ref_F = tf.shape(ref_mag)[2]
 
-    log_mag = tf.math.log1p(mag)
+    # Multi-resolution STFT for mix → input channels
+    mix_channels = []
+    for i, (fl, fs) in enumerate(configs):
+        wfn = _make_window_fn(fl)
+        s = tf.signal.stft(mix, frame_length=fl, frame_step=fs, fft_length=fl, window_fn=wfn)
+        mag = tf.abs(s)
+        log_mag = tf.math.log1p(mag)
 
-    mag = pad_batch(mag)
-    log_mag = pad_batch(log_mag)
+        if i == 0:
+            mix_channels.append(log_mag)
+        else:
+            log_mag = log_mag[tf.newaxis, ..., tf.newaxis]
+            log_mag = tf.image.resize(log_mag, [ref_T, ref_F])
+            mix_channels.append(log_mag[0, ..., 0])
 
-    mix = log_mag[0][...,None]
+    mix_input = tf.stack(mix_channels, axis=-1)
 
-    mix_mag = mag[0]
-
-    masks = mag[1:] / (mag[0] + EPS)
+    # Masks from reference STFT
+    mix_mag_ref = ref_mag[0]
+    masks = ref_mag[1:] / (ref_mag[0] + EPS)
     masks = tf.clip_by_value(masks, 0.0, 1.0)
+    masks = tf.transpose(masks, [1, 2, 0])
 
-    masks = tf.transpose(
-        masks,
-        [1,2,0]
-    )
+    # Pad to CONV_SIZE alignment
+    mix_input = pad_feature(mix_input)
+    masks = pad_feature(masks)
+    mix_mag_ref = pad_feature(mix_mag_ref)
 
-    target = tf.concat([masks, mix_mag[..., tf.newaxis]], axis=-1)
+    target = tf.concat([masks, mix_mag_ref[..., tf.newaxis]], axis=-1)
 
-    return mix, target
+    return mix_input, target
 
 
 # ==========================================================
@@ -203,14 +219,20 @@ class Normalizer:
 
         else:
             stats = np.load(stats_file)
+            mean = stats["mean"]
+            std = stats["std"]
 
-            self.mean = tf.constant(stats["mean"], dtype=tf.float32)
-            self.std = tf.constant(stats["std"], dtype=tf.float32)
+            if mean.ndim == 0:
+                self.mean = tf.constant(float(mean), dtype=tf.float32)
+                self.std = tf.constant(float(std), dtype=tf.float32)
+            else:
+                self.mean = tf.constant(mean, dtype=tf.float32)
+                self.std = tf.constant(std, dtype=tf.float32)
 
     def __call__(self, x, y):
         if self.mean is None:
             return x, y
-        
+
         x = (x - self.mean) / (self.std + 1e-8)
 
         return x, y
@@ -226,6 +248,7 @@ def create_dataset(
     num_parallel=2,
     cycle_length=2,
     prefetch_buffer=2,
+    stft_configs=None,
 ):
     files=tf.data.Dataset.list_files(
         os.path.join(tfrecord_dir,"*.tfrecord"),
@@ -248,7 +271,10 @@ def create_dataset(
 
     dataset=dataset.map(parse_tfrecord, num_parallel_calls=num_parallel)
 
-    dataset=dataset.map(preprocess, num_parallel_calls=num_parallel)
+    dataset=dataset.map(
+        partial(preprocess, configs=stft_configs),
+        num_parallel_calls=num_parallel,
+    )
     normalizer=Normalizer(stats_file)
     dataset=dataset.map(normalizer, num_parallel_calls=num_parallel)
     dataset=dataset.batch(batch_size, drop_remainder=False)
