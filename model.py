@@ -5,10 +5,10 @@ from tensorflow.keras import layers, models
 def conv_block(x, filters, kernel_size=3):
     shortcut = x
     x = layers.Conv2D(filters, kernel_size, padding="same")(x)
-    x = layers.BatchNormalization()(x)
+    x = layers.GroupNormalization(groups=8)(x)
     x = layers.Activation("relu")(x)
     x = layers.Conv2D(filters, kernel_size, padding="same")(x)
-    x = layers.BatchNormalization()(x)
+    x = layers.GroupNormalization(groups=8)(x)
     if shortcut.shape[-1] != filters:
         shortcut = layers.Conv2D(filters, 1, padding="same")(shortcut)
     x = layers.Add()([x, shortcut])
@@ -62,7 +62,7 @@ def create_unet(
     use_se=True,
     se_ratio=8,
     use_self_attn=True,
-    self_attn_heads=4,
+    self_attn_heads=2,
     n_input_channels=None,
 ):
     if n_input_channels is not None:
@@ -78,6 +78,8 @@ def create_unet(
         x = conv_block(x, filters)
         if use_se:
             x = se_block(x, se_ratio)
+        if use_self_attn and i > 0:
+            x = SelfAttentionBlock(n_heads=self_attn_heads)(x)
         skips.append(x)
         x = layers.MaxPooling2D((2, 2))(x)
 
@@ -94,16 +96,18 @@ def create_unet(
     for i in range(n_levels - 1, -1, -1):
         filters = n_filters * (2 ** i)
         x = layers.Conv2DTranspose(filters, 2, strides=(2, 2), padding="same")(x)
-        x = layers.BatchNormalization()(x)
+        x = layers.GroupNormalization(groups=8)(x)
         x = layers.Activation("relu")(x)
         x = layers.concatenate([x, skips[i]])
         x = conv_block(x, filters)
         x = conv_block(x, filters)
         if use_se:
             x = se_block(x, se_ratio)
+        if use_self_attn and i > 0:
+            x = SelfAttentionBlock(n_heads=self_attn_heads)(x)
         if dropout_rate > 0 and i > 0:
             x = layers.Dropout(dropout_rate)(x)
 
-    outputs = layers.Conv2D(n_outputs, 1, padding="same", activation="softmax")(x)
+    outputs = layers.Conv2D(n_outputs, 1, padding="same", activation="sigmoid")(x)
 
     return models.Model(inputs, outputs)

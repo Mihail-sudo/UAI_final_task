@@ -5,12 +5,13 @@ import tensorflow as tf
 
 # Must match dataset.py MR_STFT_CONFIGS
 MR_STFT_CONFIGS = [
+    (4096, 1024),
     (2048, 512),   # reference
     (1024, 256),
 ]
 CONV_SIZE = 16
 
-CHUNK_FRAMES = 864  # ~10s at 44100 Hz / 512 stride
+CHUNK_FRAMES = 432  # ~10s at 44100 Hz / 1024 stride
 CHUNK_HOP = CHUNK_FRAMES // 2
 
 
@@ -42,9 +43,16 @@ def pad_spectrogram(spec):
     return np.pad(spec, pad_width, mode="constant")
 
 
-def separate(audio, model, configs=None):
+def separate(audio, model, configs=None, stats_file=None):
     if configs is None:
         configs = MR_STFT_CONFIGS
+
+    if stats_file is not None:
+        stats = np.load(stats_file)
+        norm_mean = stats["mean"].astype(np.float32)
+        norm_std = stats["std"].astype(np.float32)
+    else:
+        norm_mean = norm_std = None
 
     window_fns = [_make_window_fn(fl) for fl, _ in configs]
 
@@ -71,6 +79,9 @@ def separate(audio, model, configs=None):
             channels.append(log_mag[0, :, :, 0])
 
     spec = np.stack(channels, axis=-1).astype(np.float32)  # (T, F, N)
+
+    if norm_mean is not None:
+        spec = (spec - norm_mean) / (norm_std + 1e-8)
 
     padded_spec = pad_spectrogram(spec)
     T_pad, F_pad = padded_spec.shape[:2]
@@ -119,9 +130,9 @@ def separate(audio, model, configs=None):
     return np.stack(sources, axis=-1)
 
 
-def separate_file(input_path, output_dir, model):
+def separate_file(input_path, output_dir, model, stats_file=None):
     audio = load_audio(input_path)
-    stems = separate(audio, model)
+    stems = separate(audio, model, stats_file=stats_file)
 
     names = ["drums", "bass", "other", "vocals"]
     os.makedirs(output_dir, exist_ok=True)
@@ -141,7 +152,13 @@ if __name__ == "__main__":
     parser.add_argument("input", help="Path to input audio file")
     parser.add_argument("--output-dir", "-o", default="separated")
     parser.add_argument("--model", "-m", default="separator.keras")
+    parser.add_argument("--stats", "-s", default="musdb18/stats.npz",
+                        help="Path to stats.npz for input normalization (omit to skip normalization)")
     args = parser.parse_args()
 
+    if not os.path.exists(args.stats):
+        print(f"Stats file not found at {args.stats}, skipping normalization")
+        args.stats = None
+
     model = tf.keras.models.load_model(args.model)
-    separate_file(args.input, args.output_dir, model)
+    separate_file(args.input, args.output_dir, model, stats_file=args.stats)

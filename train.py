@@ -9,6 +9,26 @@ from model import create_unet
 from losses import CombinedSpectrogramLoss
 
 
+class EMACallback(tf.keras.callbacks.Callback):
+    def __init__(self, decay=0.9999):
+        super().__init__()
+        self.decay = decay
+        self.ema_weights = None
+
+    def on_train_begin(self, logs=None):
+        self.ema_weights = [tf.Variable(tf.identity(w), trainable=False) for w in self.model.trainable_weights]
+
+    def on_batch_end(self, batch, logs=None):
+        for i, w in enumerate(self.model.trainable_weights):
+            self.ema_weights[i].assign(
+                self.decay * self.ema_weights[i] + (1 - self.decay) * w
+            )
+
+    def on_train_end(self, logs=None):
+        for w, ema in zip(self.model.trainable_weights, self.ema_weights):
+            w.assign(ema)
+
+
 def mask_mae(y_true, y_pred):
     return tf.reduce_mean(tf.abs(y_true[..., :4] - y_pred))
 
@@ -34,10 +54,12 @@ def main():
         batch_size=BATCH_SIZE,
         stats_file=STATS_FILE if os.path.exists(STATS_FILE) else None,
         shuffle=True,
+        augment=True,
     )
 
     val_ds = None
     callbacks = [
+        EMACallback(),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="loss", factor=0.5, patience=5, min_lr=1e-7
         ),
@@ -51,6 +73,7 @@ def main():
             shuffle=False,
         )
         callbacks = [
+            EMACallback(),
             tf.keras.callbacks.ModelCheckpoint(
                 "checkpoint.keras", save_best_only=True, monitor="val_loss"
             ),
@@ -65,9 +88,10 @@ def main():
     n_channels = len(MR_STFT_CONFIGS)
     model = create_unet(input_shape=(None, None, n_channels))
 
+    ref_fl, ref_fs = MR_STFT_CONFIGS[0]
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss=CombinedSpectrogramLoss(alpha=1.0, beta=1e-3),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE, clipnorm=1.0),
+        loss=CombinedSpectrogramLoss(alpha=1.0, beta=1.0, gamma=0.1, ref_frame_length=ref_fl, ref_frame_step=ref_fs),
         metrics=[mask_mae],
     )
 

@@ -11,6 +11,7 @@ import tensorflow as tf
 # Multi-resolution STFT configs: list of (frame_length, frame_step)
 # First entry is the reference resolution used for mask computation
 MR_STFT_CONFIGS = [
+    (4096, 1024),
     (2048, 512),   # reference: high frequency resolution
     (1024, 256),   # high time resolution
 ]
@@ -152,7 +153,7 @@ def pad_batch(x):
 # Example preprocessing
 # ==========================================================
 
-def preprocess(example, configs=None):
+def preprocess(example, configs=None, augment=False):
     if configs is None:
         configs = MR_STFT_CONFIGS
 
@@ -165,6 +166,11 @@ def preprocess(example, configs=None):
     ])
 
     mix = example["mix"]
+
+    if augment:
+        gain = tf.random.uniform([], 0.8, 1.25)
+        tracks = tracks * gain
+        mix = mix * gain
 
     # Reference STFT (first config) — used for mask computation
     ref_fl, ref_fs = configs[0]
@@ -193,6 +199,7 @@ def preprocess(example, configs=None):
 
     # Masks from reference STFT
     mix_mag_ref = ref_mag[0]
+    mix_phase = tf.math.angle(ref_stft[0])
     masks = ref_mag[1:] / (ref_mag[0] + EPS)
     masks = tf.clip_by_value(masks, 0.0, 1.0)
     masks = tf.transpose(masks, [1, 2, 0])
@@ -201,8 +208,9 @@ def preprocess(example, configs=None):
     mix_input = pad_feature(mix_input)
     masks = pad_feature(masks)
     mix_mag_ref = pad_feature(mix_mag_ref)
+    mix_phase = pad_feature(mix_phase[..., tf.newaxis])
 
-    target = tf.concat([masks, mix_mag_ref[..., tf.newaxis]], axis=-1)
+    target = tf.concat([masks, mix_mag_ref[..., tf.newaxis], mix_phase], axis=-1)
 
     return mix_input, target
 
@@ -249,6 +257,7 @@ def create_dataset(
     cycle_length=2,
     prefetch_buffer=2,
     stft_configs=None,
+    augment=False,
 ):
     files=tf.data.Dataset.list_files(
         os.path.join(tfrecord_dir,"*.tfrecord"),
@@ -272,7 +281,7 @@ def create_dataset(
     dataset=dataset.map(parse_tfrecord, num_parallel_calls=num_parallel)
 
     dataset=dataset.map(
-        partial(preprocess, configs=stft_configs),
+        partial(preprocess, configs=stft_configs, augment=augment),
         num_parallel_calls=num_parallel,
     )
     normalizer=Normalizer(stats_file)
