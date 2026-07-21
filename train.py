@@ -6,7 +6,55 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data_preproccess"))
 import tensorflow as tf
 from data_preproccess.dataset import create_dataset, MR_STFT_CONFIGS
 from model import create_unet
-from losses import CombinedSpectrogramLoss
+from losses import ComplexSeparatorLoss
+
+
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
+
+
+class GradAccumModel(tf.keras.Model):
+    def __init__(self, unet, accum_steps=4, **kwargs):
+        super().__init__(**kwargs)
+        self.unet = unet
+        self.accum_steps = accum_steps
+        self._accum_grads = None
+        self._accum_counter = tf.Variable(0, dtype=tf.int32, trainable=False)
+
+    def call(self, inputs, training=None):
+        return self.unet(inputs, training=training)
+
+    def train_step(self, data):
+        x, y = data
+
+        with tf.GradientTape() as tape:
+            y_pred = self(x, training=True)
+            loss = self.compute_loss(x, y, y_pred)
+
+        trainable = self.trainable_weights
+        grads = tape.gradient(loss, trainable)
+
+        if self._accum_grads is None or len(self._accum_grads) != len(grads):
+            self._accum_grads = [tf.zeros_like(g) for g in grads if g is not None]
+
+        j = 0
+        for i, g in enumerate(grads):
+            if g is not None:
+                self._accum_grads[j].assign_add(g / tf.cast(self.accum_steps, g.dtype))
+                j += 1
+
+        self._accum_counter.assign_add(1)
+
+        if self._accum_counter >= self.accum_steps:
+            trainable_with_grad = [v for i, v in enumerate(trainable) if grads[i] is not None]
+            self.optimizer.apply_gradients(zip(self._accum_grads, trainable_with_grad))
+            self._accum_counter.assign(0)
+            for ag in self._accum_grads:
+                ag.assign(tf.zeros_like(ag))
+
+        return {"loss": loss}
+
+    def get_config(self):
+        return {"unet": self.unet.get_config(), "accum_steps": self.accum_steps}
 
 
 class EMACallback(tf.keras.callbacks.Callback):
@@ -30,14 +78,17 @@ class EMACallback(tf.keras.callbacks.Callback):
 
 
 def mask_mae(y_true, y_pred):
-    return tf.reduce_mean(tf.abs(y_true[..., :4] - y_pred))
+    pred_mag = tf.sqrt(y_pred[..., :4] ** 2 + y_pred[..., 4:8] ** 2 + 1e-8)
+    return tf.reduce_mean(tf.abs(pred_mag - y_true[..., :4]))
+
 
 TFRECORD_DIR = "musdb18/tfrecord"
 TEST_TFRECORD_DIR = "musdb18/tfrecord_test"
 STATS_FILE = "musdb18/stats.npz"
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 EPOCHS = 100
 LEARNING_RATE = 1e-4
+
 
 def main():
     if not os.path.isdir(TFRECORD_DIR) or not any(
@@ -86,12 +137,12 @@ def main():
         ]
 
     n_channels = len(MR_STFT_CONFIGS)
-    model = create_unet(input_shape=(None, None, n_channels))
+    unet = create_unet(input_shape=(None, None, n_channels))
+    model = GradAccumModel(unet, accum_steps=4)
 
-    ref_fl, ref_fs = MR_STFT_CONFIGS[0]
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE, clipnorm=1.0),
-        loss=CombinedSpectrogramLoss(alpha=1.0, beta=1.0, gamma=0.1, ref_frame_length=ref_fl, ref_frame_step=ref_fs),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+        loss=ComplexSeparatorLoss(alpha=1.0, beta=1.0, gamma=0.1),
         metrics=[mask_mae],
     )
 

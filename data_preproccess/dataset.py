@@ -11,11 +11,13 @@ import tensorflow as tf
 # Multi-resolution STFT configs: list of (frame_length, frame_step)
 # First entry is the reference resolution used for mask computation
 MR_STFT_CONFIGS = [
-    (4096, 1024),
-    (2048, 512),   # reference: high frequency resolution
+    (4096, 1024),  # reference — used for mask computation & ISTFT
+    (8192, 2048),  # high frequency resolution
+    (2048, 512),   # mid frequency resolution
     (1024, 256),   # high time resolution
+    (256, 64),     # very high time resolution
 ]
-CONV_SIZE = 16
+CONV_SIZE = 32
 EPS = 1e-4
 
 
@@ -198,19 +200,26 @@ def preprocess(example, configs=None, augment=False):
     mix_input = tf.stack(mix_channels, axis=-1)
 
     # Masks from reference STFT
-    mix_mag_ref = ref_mag[0]
-    mix_phase = tf.math.angle(ref_stft[0])
     masks = ref_mag[1:] / (ref_mag[0] + EPS)
     masks = tf.clip_by_value(masks, 0.0, 1.0)
     masks = tf.transpose(masks, [1, 2, 0])
 
+    source_stft = ref_stft[1:]
+    source_real = tf.transpose(tf.math.real(source_stft), [1, 2, 0])
+    source_imag = tf.transpose(tf.math.imag(source_stft), [1, 2, 0])
+
+    mix_real = tf.math.real(ref_stft[0])[..., tf.newaxis]
+    mix_imag = tf.math.imag(ref_stft[0])[..., tf.newaxis]
+
     # Pad to CONV_SIZE alignment
     mix_input = pad_feature(mix_input)
     masks = pad_feature(masks)
-    mix_mag_ref = pad_feature(mix_mag_ref)
-    mix_phase = pad_feature(mix_phase[..., tf.newaxis])
+    source_real = pad_feature(source_real)
+    source_imag = pad_feature(source_imag)
+    mix_real = pad_feature(mix_real)
+    mix_imag = pad_feature(mix_imag)
 
-    target = tf.concat([masks, mix_mag_ref[..., tf.newaxis], mix_phase], axis=-1)
+    target = tf.concat([masks, source_real, source_imag, mix_real, mix_imag], axis=-1)
 
     return mix_input, target
 
