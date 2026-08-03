@@ -11,11 +11,11 @@ import tensorflow as tf
 # Multi-resolution STFT configs: list of (frame_length, frame_step)
 # First entry is the reference resolution used for mask computation
 MR_STFT_CONFIGS = [
-    (4096, 1024),  # reference — used for mask computation & ISTFT
-    (8192, 2048),  # high frequency resolution
-    (2048, 512),   # mid frequency resolution
-    (1024, 256),   # high time resolution
-    (256, 64),     # very high time resolution
+    (4096, 2048),  # reference — used for mask computation & ISTFT
+    (8192, 4096),  # high frequency resolution
+    (2048, 1024),  # mid frequency resolution
+    (1024, 512),   # high time resolution
+    (256, 128),    # very high time resolution
 ]
 CONV_SIZE = 32
 EPS = 1e-4
@@ -155,24 +155,61 @@ def pad_batch(x):
 # Example preprocessing
 # ==========================================================
 
-def preprocess(example, configs=None, augment=False):
-    if configs is None:
-        configs = MR_STFT_CONFIGS
+def _random_fir_filter(length=16):
+    """Random smooth FIR kernel with unit DC gain — acts as a random EQ."""
+    raw = tf.random.normal([length], dtype=tf.float32)
+    kernel = tf.cumsum(raw)
+    kernel = kernel / (tf.reduce_sum(kernel) + 1e-6)
+    return kernel
 
-    tracks = tf.stack([
-        example["mix"],
+
+def _augment_stems(example):
+    """Demucs-style augmentation: random gain + random EQ per stem,
+    then rebuild the mix from the augmented stems.
+
+    Returns (mix, stems) with stems shaped (4, N).
+    """
+    stems = tf.stack([
         example["drums"],
         example["bass"],
         example["other"],
         example["vocals"],
     ])
 
-    mix = example["mix"]
+    gains = tf.exp(tf.random.uniform([4, 1], -0.36, 0.36))  # 0.7 .. 1.43 per stem
+    stems = stems * gains
+
+    filtered = []
+    for i in range(4):
+        kernel = _random_fir_filter()[:, tf.newaxis, tf.newaxis]  # (L, 1, 1)
+        s = stems[i][tf.newaxis, :, tf.newaxis]                   # (1, N, 1)
+        filtered.append(tf.nn.conv1d(s, kernel, stride=1, padding="SAME")[0, :, 0])
+    stems = tf.stack(filtered)
+
+    mix = tf.reduce_sum(stems, axis=0)
+
+    gain = tf.random.uniform([], 0.8, 1.25)
+    stems = stems * gain
+    mix = mix * gain
+    return mix, stems
+
+
+def preprocess(example, configs=None, augment=False):
+    if configs is None:
+        configs = MR_STFT_CONFIGS
 
     if augment:
-        gain = tf.random.uniform([], 0.8, 1.25)
-        tracks = tracks * gain
-        mix = mix * gain
+        mix, stems = _augment_stems(example)
+        tracks = tf.concat([[mix], stems], axis=0)
+    else:
+        mix = example["mix"]
+        tracks = tf.stack([
+            example["mix"],
+            example["drums"],
+            example["bass"],
+            example["other"],
+            example["vocals"],
+        ])
 
     # Reference STFT (first config) — used for mask computation
     ref_fl, ref_fs = configs[0]
@@ -238,19 +275,25 @@ class Normalizer:
             stats = np.load(stats_file)
             mean = stats["mean"]
             std = stats["std"]
-
+            # Store plain values: converting inside __call__ keeps the
+            # tensors as graph constants. Eager tensors captured by the
+            # dataset map would be turned into hidden resource variables on
+            # CPU:0, crashing GPU training ("Trying to access resource ...").
             if mean.ndim == 0:
-                self.mean = tf.constant(float(mean), dtype=tf.float32)
-                self.std = tf.constant(float(std), dtype=tf.float32)
+                self.mean = float(mean)
+                self.std = float(std)
             else:
-                self.mean = tf.constant(mean, dtype=tf.float32)
-                self.std = tf.constant(std, dtype=tf.float32)
+                self.mean = np.asarray(mean, dtype=np.float32)
+                self.std = np.asarray(std, dtype=np.float32)
 
     def __call__(self, x, y):
         if self.mean is None:
             return x, y
 
-        x = (x - self.mean) / (self.std + 1e-8)
+        mean = tf.constant(self.mean, dtype=tf.float32)
+        std = tf.constant(self.std, dtype=tf.float32)
+
+        x = (x - mean) / (std + 1e-8)
 
         return x, y
 
@@ -262,9 +305,9 @@ def create_dataset(
     shuffle=True,
     shuffle_buffer=128,
     compression_type="GZIP",
-    num_parallel=2,
-    cycle_length=2,
-    prefetch_buffer=2,
+    num_parallel=1,
+    cycle_length=1,
+    prefetch_buffer=1,
     stft_configs=None,
     augment=False,
 ):
@@ -283,9 +326,6 @@ def create_dataset(
         num_parallel_calls=num_parallel,
         deterministic=not shuffle
     )
-
-    if shuffle:
-        dataset=dataset.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
 
     dataset=dataset.map(parse_tfrecord, num_parallel_calls=num_parallel)
 

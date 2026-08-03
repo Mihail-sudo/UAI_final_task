@@ -6,15 +6,15 @@ from refine import create_refine_model
 
 # Must match dataset.py MR_STFT_CONFIGS
 MR_STFT_CONFIGS = [
-    (4096, 1024),  # reference — used for mask computation & ISTFT
-    (8192, 2048),  # high frequency resolution
-    (2048, 512),   # mid frequency resolution
-    (1024, 256),   # high time resolution
-    (256, 64),     # very high time resolution
+    (4096, 2048),  # reference — used for mask computation & ISTFT
+    (8192, 4096),  # high frequency resolution
+    (2048, 1024),  # mid frequency resolution
+    (1024, 512),   # high time resolution
+    (256, 128),    # very high time resolution
 ]
 CONV_SIZE = 32
 
-CHUNK_FRAMES = 448  # ~10.4s at 44100 Hz / 1024 stride, divisible by CONV_SIZE=32
+CHUNK_FRAMES = 224  # ~10.4s at 44100 Hz / 2048 stride, divisible by CONV_SIZE=32
 CHUNK_HOP = CHUNK_FRAMES // 2
 
 
@@ -46,6 +46,19 @@ def load_audio(path, sr=44100):
     if orig_sr != sr:
         audio = tf.signal.resample(audio, orig_sr, sr).numpy()
     return audio
+
+
+def median_filter_3x3(x):
+    """3x3 median filter applied per channel. x: (T, F, C) -> (T, F, C)."""
+    T = tf.shape(x)[0]
+    F = tf.shape(x)[1]
+    padded = tf.pad(x, [[1, 1], [1, 1], [0, 0]], mode="REFLECT")
+    neighbors = []
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            neighbors.append(padded[1 + dy:1 + dy + T, 1 + dx:1 + dx + F])
+    stacked = tf.stack(neighbors, axis=-1)  # (T, F, C, 9)
+    return tf.sort(stacked, axis=-1)[..., 4]
 
 
 def pad_spectrogram(spec):
@@ -115,7 +128,9 @@ def separate(audio, model, configs=None, stats_file=None, refine_model=None):
             chunk = np.pad(chunk, [(0, pad), (0, 0), (0, 0)])
 
         chunk_input = chunk[np.newaxis, :, :, :]  # (1, t, f, N)
-        pred = model.predict(chunk_input, verbose=0)[0]
+        # direct call instead of model.predict: predict() builds its own tf.data
+        # pipeline, which deadlocks when called from inside a dataset generator
+        pred = model(chunk_input, training=False).numpy()[0]
 
         if pad:
             pred = pred[:-pad]
@@ -127,6 +142,11 @@ def separate(audio, model, configs=None, stats_file=None, refine_model=None):
     mask_accum /= weight_accum[:, np.newaxis, np.newaxis] + 1e-8
 
     pred = mask_accum[:T, :F, :].astype(np.float32)  # (T, F, 8)
+
+    # 3x3 median smoothing: removes speckle in noise-floor bins without
+    # cutting any frequencies
+    pred = median_filter_3x3(pred).numpy()
+
     mask_r = pred[:, :, :4]  # (T, F, 4)
     mask_i = pred[:, :, 4:]  # (T, F, 4)
 

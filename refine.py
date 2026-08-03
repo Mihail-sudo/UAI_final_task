@@ -7,6 +7,16 @@ def glu(x, n_out):
     return a * tf.sigmoid(b)
 
 
+class GLU(layers.Layer):
+    def __init__(self, n_out, **kwargs):
+        super().__init__(**kwargs)
+        self.n_out = n_out
+
+    def call(self, x):
+        a, b = tf.split(x, 2, axis=-1)
+        return a * tf.sigmoid(b)
+
+
 class ConvBlock(layers.Layer):
     def __init__(self, in_ch, out_ch, kernel=7, stride=1, dilation=1):
         super().__init__()
@@ -44,6 +54,7 @@ class TransposeBlock(layers.Layer):
         x = self.conv(x)
         x = self.norm(x)
         x = glu(x, x.shape[-1] // 2)
+        x = x[:, :tf.shape(skip)[1], :]
         x = tf.concat([x, skip], axis=-1)
         x = self.proj(x)
         return x
@@ -67,7 +78,7 @@ def create_refine_model(
         if i == 0:
             x = layers.Conv1D(out_ch, kernel_size, padding="same", use_bias=False)(x)
             x = layers.GroupNormalization(groups=min(out_ch // 4, 32))(x)
-            x = glu(x, out_ch)
+            x = GLU(out_ch)(x)
         else:
             x = ConvBlock(in_ch, out_ch, kernel_size, stride=stride)(x)
         skips.append(x)
